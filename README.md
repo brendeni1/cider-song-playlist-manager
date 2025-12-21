@@ -75,7 +75,7 @@ By using this plugin, you acknowledge that you do so at your own risk. Always ma
 
 1. Hover over any track in your library, playlists, or albums
 2. Move your cursor to where the duration time is displayed
-3. The "+" button will appear
+3. The "**+**" button will appear
 4. Click to open the playlist manager
 
 ### Managing Playlists
