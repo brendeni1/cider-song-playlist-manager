@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
 import { DialogAPI, v3 } from "@ciderapp/pluginkit";
+import { PlaylistCache, type CachedPlaylist } from "../utils/cache";
 
 interface PlaylistCheckState {
   id: string;
@@ -27,6 +28,7 @@ const loading = ref(true);
 const processing = ref(false);
 const searchQuery = ref("");
 const aborted = ref(false);
+const cacheUsed = ref(false);
 
 const filteredPlaylists = computed(() => {
   if (!searchQuery.value) return playlists.value;
@@ -54,16 +56,57 @@ onMounted(async () => {
   await loadPlaylists();
 });
 
+/**
+ * Try to find the library ID for a catalog song
+ */
+async function findLibraryId(catalogId: string): Promise<string | null> {
+  try {
+    // Search for the song in the library using catalog ID
+    const response = await v3<any>(
+      `/v1/me/library/songs`,
+      { 
+        filter: { id: catalogId },
+        limit: 1
+      }
+    );
+    
+    const songs = Array.isArray(response.data) ? response.data : response.data?.data || [];
+    if (songs.length > 0 && songs[0].id) {
+      console.log(`Found library ID ${songs[0].id} for catalog ID ${catalogId}`);
+      return songs[0].id;
+    }
+  } catch (error) {
+    console.log(`Could not find library ID for catalog ${catalogId}:`, error);
+  }
+  return null;
+}
+
 async function loadPlaylists() {
   try {
     loading.value = true;
-
+    const settings = PlaylistCache.getSettings();
+    
+    console.log("Cache settings:", settings);
+    console.log("Song ID to search for:", props.songId);
+    console.log("Song ID type:", props.songId.startsWith('i.') ? 'library' : 'catalog');
+    
+    // If we have a catalog ID, try to find the library ID
+    let searchIds = [props.songId];
+    if (!props.songId.startsWith('i.')) {
+      const libraryId = await findLibraryId(props.songId);
+      if (libraryId) {
+        searchIds.push(libraryId);
+        console.log(`Will search for both catalog ID ${props.songId} and library ID ${libraryId}`);
+      } else {
+        console.log(`Song ${props.songId} is not in library yet`);
+      }
+    }
+    
     console.log("Fetching playlists using v3 API...");
 
-    // Use v3 helper from pluginkit
+    // Get all playlists from API
     const response = await v3<any>(`/v1/me/library/playlists`, { limit: 100 });
     
-    // Check if aborted
     if (aborted.value) {
       console.log("Playlist loading aborted");
       return;
@@ -77,101 +120,142 @@ async function loadPlaylists() {
 
     console.log("Found", userPlaylists.length, "playlists");
 
-    // Filter out Apple Music playlists (Favorites, Rotations, etc.)
-    // These have canEdit: false and are system playlists
+    // Filter out Apple Music playlists
     const editablePlaylists = userPlaylists.filter((playlist: any) => {
       const canEdit = playlist.attributes?.canEdit !== false;
       const isLibraryPlaylist = playlist.type === 'library-playlists';
       return canEdit && isLibraryPlaylist;
     });
 
-    console.log("Found", editablePlaylists.length, "editable playlists (filtered out Apple Music playlists)");
+    console.log("Found", editablePlaylists.length, "editable playlists");
 
-    // Sort by last modified date (most recent first)
+    // Sort by last modified date
     const sortedPlaylists = [...editablePlaylists].sort((a: any, b: any) => {
       const dateA = new Date(a.attributes?.lastModifiedDate || 0);
       const dateB = new Date(b.attributes?.lastModifiedDate || 0);
       return dateB.getTime() - dateA.getTime();
     });
 
-    // Check if song is in each playlist
-    console.log(
-      `Checking if song ${props.songId} is in ${sortedPlaylists.length} playlists...`
-    );
-    
-    // Only batch if we have many playlists to avoid unnecessary delays
-    const shouldBatch = sortedPlaylists.length > 20;
-    const batchSize = shouldBatch ? 10 : sortedPlaylists.length;
+    // Get modified playlists that need refresh
+    const modifiedPlaylistIds = PlaylistCache.getModifiedPlaylists();
+    console.log(`Found ${modifiedPlaylistIds.length} modified playlists that need refresh`);
+
+    // Check which playlists we can use from cache
     const playlistStates: PlaylistCheckState[] = [];
+    const playlistsToFetch: any[] = [];
+    let cacheHits = 0;
     
-    for (let i = 0; i < sortedPlaylists.length; i += batchSize) {
-      // Check if aborted before each batch
-      if (aborted.value) {
-        console.log("Playlist checking aborted");
-        return;
+    for (const playlist of sortedPlaylists) {
+      const playlistId = playlist.id;
+      const playlistName = playlist.attributes?.name || "Untitled Playlist";
+      
+      // Check if this playlist was modified or if cache is expired/disabled
+      const needsRefresh = modifiedPlaylistIds.includes(playlistId);
+      // Check cache for any of our search IDs
+      let cachedResult = null;
+      if (!needsRefresh) {
+        for (const searchId of searchIds) {
+          cachedResult = PlaylistCache.isSongInPlaylist(playlistId, searchId);
+          if (cachedResult !== null) break;
+        }
       }
       
-      const batch = sortedPlaylists.slice(i, i + batchSize);
-      const batchStates = await Promise.all(
-        batch.map(async (playlist: any, batchIndex: number) => {
-          const index = i + batchIndex;
-          const playlistName = playlist.attributes?.name || "Untitled Playlist";
-          const playlistId = playlist.id;
-          console.log(
-            `[${index}] Checking playlist: "${playlistName}" (${playlistId})`
-          );
-          const isInPlaylist = await checkSongInPlaylist(
-            playlistId,
-            playlistName
-          );
-          console.log(
-            `[${index}]   Result: ${isInPlaylist ? "✅ FOUND" : "❌ Not found"}`
-          );
-
-          return {
-            id: playlistId,
-            name: playlistName,
-            isInPlaylist,
-            originalState: isInPlaylist,
-            lastModified: new Date(playlist.attributes?.lastModifiedDate),
-            artworkUrl: playlist.attributes?.artwork?.url
-              ?.replace("{w}", "60")
-              ?.replace("{h}", "60")
-              ?.replace("{f}", "jpg")
-              ?.replace(".{f}", ".jpg"),
-          };
-        })
-      );
-      
-      playlistStates.push(...batchStates);
-      
-      // Only add delay between batches if we're actually batching AND not on last batch
-      if (shouldBatch && i + batchSize < sortedPlaylists.length && !aborted.value) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+      if (cachedResult !== null && settings.enabled) {
+        // Use cached result
+        cacheHits++;
+        console.log(`✓ Cache hit for "${playlistName}": ${cachedResult}`);
+        
+        playlistStates.push({
+          id: playlistId,
+          name: playlistName,
+          isInPlaylist: cachedResult,
+          originalState: cachedResult,
+          lastModified: new Date(playlist.attributes?.lastModifiedDate),
+          artworkUrl: playlist.attributes?.artwork?.url
+            ?.replace("{w}", "60")
+            ?.replace("{h}", "60")
+            ?.replace("{f}", "jpg")
+            ?.replace(".{f}", ".jpg"),
+        });
+      } else {
+        // Need to fetch from API
+        playlistsToFetch.push(playlist);
       }
     }
 
+    console.log(`Cache: ${cacheHits} hits, ${playlistsToFetch.length} misses`);
+    cacheUsed.value = cacheHits > 0;
+
+    // Fetch playlists that aren't cached
+    if (playlistsToFetch.length > 0) {
+      console.log(`Fetching ${playlistsToFetch.length} playlists from API...`);
+      
+      // Batch in groups to avoid overwhelming the API
+      const batchSize = 10;
+      const playlistsToCache: CachedPlaylist[] = [];
+      
+      for (let i = 0; i < playlistsToFetch.length; i += batchSize) {
+        if (aborted.value) {
+          console.log("Playlist checking aborted");
+          return;
+        }
+        
+        const batch = playlistsToFetch.slice(i, i + batchSize);
+        const batchStates = await Promise.all(
+          batch.map(async (playlist: any) => {
+            const playlistName = playlist.attributes?.name || "Untitled Playlist";
+            const playlistId = playlist.id;
+            
+            const result = await checkSongInPlaylistWithCache(playlistId, playlistName, searchIds);
+            
+            // Store for caching
+            playlistsToCache.push(result.cached);
+
+            return {
+              id: playlistId,
+              name: playlistName,
+              isInPlaylist: result.found,
+              originalState: result.found,
+              lastModified: new Date(playlist.attributes?.lastModifiedDate),
+              artworkUrl: playlist.attributes?.artwork?.url
+                ?.replace("{w}", "60")
+                ?.replace("{h}", "60")
+                ?.replace("{f}", "jpg")
+                ?.replace(".{f}", ".jpg"),
+            };
+          })
+        );
+        
+        playlistStates.push(...batchStates);
+        
+        // Add small delay between batches
+        if (i + batchSize < playlistsToFetch.length && !aborted.value) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+
+      // Update cache with newly fetched playlists
+      if (playlistsToCache.length > 0 && settings.enabled) {
+        PlaylistCache.updatePlaylists(playlistsToCache);
+      }
+    }
+
+    // Clear the modified playlists list since we just refreshed them
+    if (modifiedPlaylistIds.length > 0) {
+      PlaylistCache.clearModifiedPlaylists();
+    }
+
+    // Sort by name for display
+    playlistStates.sort((a, b) => a.name.localeCompare(b.name));
     playlists.value = playlistStates;
     
-    // Don't log if aborted
     if (!aborted.value) {
       const matchedPlaylists = playlistStates.filter((p) => p.isInPlaylist);
-      console.log(
-        `Final playlist states with ${matchedPlaylists.length} matches:`
-      );
-      matchedPlaylists.forEach((p) => {
-        console.log(
-          `  ✅ "${p.name}" (${p.id}) - isInPlaylist: ${p.isInPlaylist}`
-        );
-      });
-      console.log(
-        "All playlists state:",
-        playlists.value.map((p) => ({
-          name: p.name,
-          isInPlaylist: p.isInPlaylist,
-          originalState: p.originalState,
-        }))
-      );
+      console.log(`Found song in ${matchedPlaylists.length} playlists`);
+      
+      if (cacheHits > 0) {
+        console.log(`✓ Used cache for ${cacheHits}/${playlistStates.length} playlists`);
+      }
     }
   } catch (error) {
     console.error("Error loading playlists:", error);
@@ -183,12 +267,12 @@ async function loadPlaylists() {
   }
 }
 
-async function checkSongInPlaylist(
+async function checkSongInPlaylistWithCache(
   playlistId: string,
-  playlistName: string
-): Promise<boolean> {
+  playlistName: string,
+  searchIds: string[]
+): Promise<{ found: boolean; cached: CachedPlaylist }> {
   try {
-    const songIdStr = String(props.songId);
     let allTracks: any[] = [];
     let offset = 0;
     const limit = 100;
@@ -206,89 +290,98 @@ async function checkSongInPlaylist(
           ? response.data
           : response.data?.data || [];
         
-        // If we get no tracks, we've reached the end
         if (tracks.length === 0) {
           hasMore = false;
           break;
         }
         
         allTracks = allTracks.concat(tracks);
-
-        // Check if there are more tracks - if we got fewer than the limit, we're done
         hasMore = tracks.length === limit;
         offset += limit;
 
-        // Safety check to prevent infinite loops
         if (offset > 1000) {
-          console.warn(
-            `Stopped fetching tracks for "${playlistName}" at 1000 tracks`
-          );
+          console.warn(`Stopped fetching tracks for "${playlistName}" at 1000 tracks`);
           break;
         }
       } catch (error: any) {
-        // If we get a 404 or any error, assume we've reached the end
-        // The v3 API logs this error, but we can safely ignore it as it just means
-        // we've paginated past the end of the playlist
         console.log(`Finished pagination for "${playlistName}" (${allTracks.length} tracks)`);
         hasMore = false;
         break;
       }
     }
 
-    console.log(
-      `  Playlist "${playlistName}" has ${allTracks.length} total tracks (fetched with pagination)`
-    );
+    console.log(`Playlist "${playlistName}" has ${allTracks.length} total tracks`);
 
-    // Log first few tracks to see their structure (only for emoji playlists)
-    if (
-      allTracks.length > 0 &&
-      playlistName.match(
-        /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u
-      )
-    ) {
-      console.log(`  First track in "${playlistName}":`, {
-        id: allTracks[0].id,
-        type: allTracks[0].type,
-        catalogId: allTracks[0].attributes?.playParams?.catalogId,
-        reportingId: allTracks[0].attributes?.playParams?.reportingId,
-        playParamsId: allTracks[0].attributes?.playParams?.id,
-        name: allTracks[0].attributes?.name,
-      });
-    }
-
-    const found = allTracks.some((track: any) => {
-      // Try multiple ID fields
-      const trackId = String(track.id || "");
-      const catalogId = String(track.attributes?.playParams?.catalogId || "");
-      const reportingId = String(
-        track.attributes?.playParams?.reportingId || ""
+    // Extract all track IDs for caching
+    const trackIds = allTracks.map((track: any) => {
+      const libraryId = String(
+        track.id ||
+        track.attributes?.playParams?.id ||
+        ""
       );
-      const playParamsId = String(track.attributes?.playParams?.id || "");
+      const catalogId = String(
+        track.attributes?.playParams?.catalogId ||
+        track.attributes?.playParams?.reportingId ||
+        ""
+      );
+      
+      // Return both IDs if we have them
+      return { libraryId, catalogId };
+    }).filter(ids => ids.libraryId || ids.catalogId);
 
-      // Check if any field matches
-      const matches =
-        trackId === songIdStr ||
-        catalogId === songIdStr ||
-        reportingId === songIdStr ||
-        playParamsId === songIdStr ||
-        // Also check if the songId is contained in the track ID (for cases like i.1440881859)
-        trackId.includes(songIdStr) ||
-        catalogId.includes(songIdStr) ||
-        reportingId.includes(songIdStr);
+    console.log(`Playlist "${playlistName}" sample track IDs:`, trackIds.slice(0, 3));
 
-      if (matches) {
-        console.log(
-          `  ✅ "${playlistName}" - Found match! Track ID: ${trackId}, Catalog: ${catalogId}, Reporting: ${reportingId}`
-        );
-      }
-
-      return matches;
+    // Flatten to array of all IDs for checking
+    const allIds: string[] = [];
+    trackIds.forEach(({ libraryId, catalogId }) => {
+      if (libraryId) allIds.push(libraryId);
+      if (catalogId) allIds.push(catalogId);
     });
 
-    return found;
+    // Check if any of our search IDs are in the tracks
+    const found = searchIds.some((searchId: string) => {
+      const cleanSearchId = searchId.replace(/^i\./, '');
+      
+      return allIds.some((trackId: string) => {
+        const cleanTrackId = trackId.replace(/^i\./, '');
+        
+        return trackId === searchId ||
+               cleanTrackId === cleanSearchId ||
+               trackId.includes(searchId) ||
+               searchId.includes(trackId) ||
+               cleanTrackId.includes(cleanSearchId) ||
+               cleanSearchId.includes(cleanTrackId);
+      });
+    });
+
+    console.log(`Song found in "${playlistName}"?: ${found}`);
+    console.log(`Search IDs: ${searchIds.join(', ')}`);
+    if (!found && allIds.length > 0) {
+      console.log(`Sample playlist track IDs: ${allIds.slice(0, 5).join(', ')}`);
+    }
+
+    return {
+      found,
+      cached: {
+        id: playlistId,
+        name: playlistName,
+        tracks: allIds,
+        lastModified: new Date(),
+        cachedAt: new Date(),
+      },
+    };
   } catch (error) {
     console.error(`Error checking playlist ${playlistId}:`, error);
-    return false;
+    return {
+      found: false,
+      cached: {
+        id: playlistId,
+        name: playlistName,
+        tracks: [],
+        lastModified: new Date(),
+        cachedAt: new Date(),
+      },
+    };
   }
 }
 
@@ -309,11 +402,11 @@ async function applyChanges() {
       (p) => p.isInPlaylist !== p.originalState
     );
 
-    // Only add delays if we're updating many playlists
-    const shouldDelay = changes.length > 5;
+    const modifiedIds: string[] = [];
     
     for (let i = 0; i < changes.length; i++) {
       const playlist = changes[i];
+      modifiedIds.push(playlist.id);
       
       if (playlist.isInPlaylist) {
         await addSongToPlaylist(playlist.id);
@@ -321,13 +414,15 @@ async function applyChanges() {
         await removeSongFromPlaylist(playlist.id);
       }
       
-      // Only delay if we have many changes AND not on the last one
-      if (shouldDelay && i < changes.length - 1) {
+      if (i < changes.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
 
-    // Success! Close modal without alert
+    // Mark these playlists as modified so they'll be refreshed next time
+    PlaylistCache.markPlaylistsModified(modifiedIds);
+    console.log(`Marked ${modifiedIds.length} playlists for refresh`);
+
     closeModal();
   } catch (error) {
     console.error("Error applying changes:", error);
@@ -338,7 +433,6 @@ async function applyChanges() {
 
 async function addSongToPlaylist(playlistId: string) {
   try {
-    // Use direct fetch with proper MusicKit authentication
     const musicKit = (window as any).MusicKit?.getInstance();
     const developerToken = musicKit?.developerToken;
     const userToken = musicKit?.musicUserToken;
@@ -388,7 +482,6 @@ async function removeSongFromPlaylist(playlistId: string) {
     const limit = 100;
     let hasMore = true;
 
-    // Fetch all tracks with pagination
     while (hasMore) {
       try {
         const response = await v3<any>(
@@ -400,36 +493,28 @@ async function removeSongFromPlaylist(playlistId: string) {
           ? response.data
           : response.data?.data || [];
         
-        // If we get no tracks, we've reached the end
         if (tracks.length === 0) {
           hasMore = false;
           break;
         }
         
         allTracks = allTracks.concat(tracks);
-
-        // Check if there are more tracks - if we got fewer than the limit, we're done
         hasMore = tracks.length === limit;
         offset += limit;
 
         if (offset > 1000) break;
       } catch (error: any) {
-        // If we get an error (usually 404), assume we've reached the end
-        // The v3 API logs this error, but we can safely ignore it
         console.log(`Finished pagination for playlist (${allTracks.length} tracks)`);
         hasMore = false;
         break;
       }
     }
 
-    // Find which track to remove and filter it out
     let foundIndex = -1;
     const remainingTracks = allTracks.filter((track: any, index: number) => {
       const trackId = String(track.id || "");
       const catalogId = String(track.attributes?.playParams?.catalogId || "");
-      const reportingId = String(
-        track.attributes?.playParams?.reportingId || ""
-      );
+      const reportingId = String(track.attributes?.playParams?.reportingId || "");
       const playParamsId = String(track.attributes?.playParams?.id || "");
 
       const isMatch =
@@ -445,21 +530,16 @@ async function removeSongFromPlaylist(playlistId: string) {
         foundIndex = index;
       }
 
-      return !isMatch; // Keep tracks that don't match
+      return !isMatch;
     });
 
     if (foundIndex === -1) {
-      console.warn(
-        `Track not found in playlist ${playlistId}, nothing to remove`
-      );
+      console.warn(`Track not found in playlist ${playlistId}, nothing to remove`);
       return;
     }
 
-    console.log(
-      `Removing track at index ${foundIndex}. Before: ${allTracks.length}, After: ${remainingTracks.length}`
-    );
+    console.log(`Removing track at index ${foundIndex}. Before: ${allTracks.length}, After: ${remainingTracks.length}`);
 
-    // Use Apple Music API to replace the playlist with remaining tracks
     const musicKit = (window as any).MusicKit?.getInstance();
     const developerToken = musicKit?.developerToken;
     const userToken = musicKit?.musicUserToken;
@@ -468,13 +548,11 @@ async function removeSongFromPlaylist(playlistId: string) {
       throw new Error("Music tokens not available");
     }
 
-    // Build the data array with remaining tracks
     const data = remainingTracks.map((track) => ({
       id: track.id,
       type: track.type || "library-songs",
     }));
 
-    // Use PUT to replace the entire playlist (matching the curl example)
     const response = await fetch(
       `https://amp-api.music.apple.com/v1/me/library/playlists/${playlistId}/tracks`,
       {
@@ -504,16 +582,12 @@ async function removeSongFromPlaylist(playlistId: string) {
 
 function closeModal() {
   console.log("closeModal called, onClose function:", props.onClose);
-
-  // Set aborted flag to stop any ongoing API calls
   aborted.value = true;
   
-  // Call the close function passed from main.ts
   if (props.onClose) {
     props.onClose();
   }
 
-  // Also emit for good measure
   emits("dialogClose");
 }
 </script>
@@ -545,6 +619,9 @@ function closeModal() {
           class="search-input"
           placeholder="Search playlists..."
         />
+        <div v-if="cacheUsed && !loading" class="cache-indicator" title="Using cached data">
+          ⚡
+        </div>
       </div>
 
       <div v-if="loading" class="loading-container">
@@ -691,11 +768,13 @@ function closeModal() {
   padding-left: 16px;
   padding-right: 16px;
   width: calc(100% + 32px);
+  position: relative;
 }
 
 .search-input {
   width: 100%;
   padding: 8px 12px;
+  padding-right: 36px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.05);
@@ -708,6 +787,25 @@ function closeModal() {
 .search-input:focus {
   border-color: var(--keyColor, #ff0033);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.cache-indicator {
+  position: absolute;
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 18px;
+  opacity: 0.6;
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.6;
+  }
 }
 
 .loading-container {

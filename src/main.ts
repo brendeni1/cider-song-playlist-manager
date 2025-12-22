@@ -8,6 +8,7 @@ import {
   createModal,
 } from "@ciderapp/pluginkit";
 import PlaylistManagerModal from "./components/PlaylistManagerModal.vue";
+import SettingsModal from "./components/SettingsModal.vue";
 import PluginConfig from "./plugin.config";
 
 /**
@@ -33,6 +34,10 @@ export const CustomElements = {
     shadowRoot: false,
     configureApp,
   }),
+  "settings-modal": defineCustomElement(SettingsModal, {
+    shadowRoot: false,
+    configureApp,
+  }),
 };
 
 /**
@@ -49,6 +54,12 @@ const { plugin, customElementName } = definePluginContext({
       const _key = key as keyof typeof CustomElements;
       customElements.define(customElementName(_key), value);
     }
+
+    /**
+     * Defining our custom settings element
+     * This tells Cider to use our settings component
+     */
+    this.SettingsElement = customElementName("settings-modal");
 
     /**
      * Function to open the modal with song data
@@ -541,11 +552,42 @@ const { plugin, customElementName } = definePluginContext({
       },
     });
 
+    /**
+     * Function to open the settings modal
+     */
+    function openSettingsModal() {
+      console.log("Opening Playlist Manager Settings");
+
+      const { openDialog, closeDialog, dialogElement } = createModal({
+        escClose: true,
+      });
+
+      const content = document.createElement(
+        customElementName("settings-modal")
+      ) as any;
+
+      content._props = {
+        standalone: true,
+        onClose: () => {
+          console.log("Settings modal closing...");
+          if (content.parentNode) {
+            content.parentNode.removeChild(content);
+          }
+          closeDialog();
+        },
+      };
+
+      dialogElement.appendChild(content);
+      openDialog();
+    }
+
     // Expose for testing
     (window as any).openPlaylistManager = openPlaylistManagerModal;
+    (window as any).openPlaylistSettings = openSettingsModal;
     
     console.log("Playlist Manager Plugin loaded successfully!");
     console.log("Test with: window.openPlaylistManager('1440881859', 'More Than You Know', 'Axwell Λ Ingrosso', 'More Than You Know')");
+    console.log("Open settings with: window.openPlaylistSettings()");
     
     // Try to add inline buttons to tracks (experimental)
     // This will attempt to inject a button next to the "..." menu on each track
@@ -567,7 +609,7 @@ const { plugin, customElementName } = definePluginContext({
           }
         }
         
-        if (menuSection && element.dataset.itemId) {
+        if (menuSection) {
           // Mark this track as processed
           element.dataset.playlistBtn = 'true';
           
@@ -586,7 +628,58 @@ const { plugin, customElementName } = definePluginContext({
             e.stopPropagation();
             
             // Extract song data from the track element
-            const songId = element.dataset.itemId;
+            let songId = element.dataset.itemId;
+            
+            // In album view, try to get the ID from other attributes or Vue data
+            if (!songId) {
+              console.log('No data-item-id found, checking alternative sources...');
+              
+              // Try to get from Vue component data
+              const vueData = (element as any).__vueParentComponent?.ctx || 
+                             (element as any).__vue__ ||
+                             (element as any)._vnode?.component?.ctx;
+              
+              if (vueData?.item) {
+                songId = vueData.item.id || 
+                        vueData.item.attributes?.playParams?.catalogId ||
+                        vueData.item.attributes?.playParams?.id;
+                console.log('Found ID from Vue data:', songId);
+              }
+              
+              // Try to get from track number in album view
+              if (!songId) {
+                const albumView = element.closest('.album-view');
+                if (albumView) {
+                  // Get track index
+                  const trackElements = albumView.querySelectorAll('.ri-list-item');
+                  const trackIndex = Array.from(trackElements).indexOf(element);
+                  
+                  // Try to get album data
+                  const albumData = (albumView as any).__vueParentComponent?.ctx ||
+                                   (albumView as any).__vue__ ||
+                                   (albumView as any)._vnode?.component?.ctx;
+                  
+                  if (albumData?.album?.relationships?.tracks?.data?.[trackIndex]) {
+                    const track = albumData.album.relationships.tracks.data[trackIndex];
+                    songId = track.id || 
+                            track.attributes?.playParams?.catalogId ||
+                            track.attributes?.playParams?.id;
+                    console.log('Found ID from album tracks data:', songId);
+                  }
+                }
+              }
+            }
+            
+            console.log('Final extracted songId:', songId);
+            
+            if (!songId) {
+              console.error('Could not extract song ID from track element');
+              console.log('Element:', element);
+              console.log('Element dataset:', element.dataset);
+              console.log('Element Vue data:', (element as any).__vueParentComponent?.ctx);
+              DialogAPI.createAlert('Unable to identify song. Please use the context menu instead.');
+              return;
+            }
             
             // Get title from the FIRST title-text element (not the album duplicate)
             const titleSection = element.querySelector('.title-section');
