@@ -40,7 +40,7 @@ Works across common views - playlists and albums.
 
 ![Multi-View Support](images/multi-view.png)
 
-> Note: This plugin currently does not work in search results or on artist pages, just in albums and playlists.
+> Note: This plugin currently does not work in search results or on artist pages, just in albums, your library and playlists.
 
 ## Installation
 
