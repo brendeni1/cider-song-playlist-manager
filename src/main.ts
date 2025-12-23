@@ -236,6 +236,21 @@ const { plugin, customElementName } = definePluginContext({
       console.log("Right-clicked element classes:", lastRightClickedElement.className);
       console.log("Right-clicked element parent:", lastRightClickedElement.parentElement);
     }, true);
+    
+    // Also capture clicks on menu buttons (the "..." button)
+    document.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      // Check if we clicked on a menu button or its children
+      const menuBtn = target.closest('.menu-btn');
+      if (menuBtn) {
+        // Find the parent song item
+        const songItem = menuBtn.closest('.ri-list-item, .library-song-item, [data-item-id]');
+        if (songItem) {
+          lastRightClickedElement = songItem as HTMLElement;
+          console.log("Menu button clicked, storing song element:", lastRightClickedElement);
+        }
+      }
+    }, true);
 
     /**
      * Add "Manage Playlists" to the context menu for media items
@@ -256,15 +271,16 @@ const { plugin, customElementName } = definePluginContext({
         if (lastRightClickedElement) {
           const target = lastRightClickedElement;
           
-          // Look for media item in parent chain - Cider uses different classes for different views
+          // Look for media item in parent chain - including library browser
           const mediaItem = target.closest('.ri-list-item') ||         // Playlist/Library list view
-                           target.closest('[data-item-id]') ||          // Any item with data attributes
-                           target.closest('.c-listitem-short') ||       // Search and Artist page
-                           target.closest('.track-item') ||             // Track items
-                           target.closest('.song-item') ||              // Song items
-                           target.closest('[data-media-item]') ||       // Generic media items
-                           target.closest('.media-item') ||             // Alternative media items
-                           target.closest('.album-track');              // Album view tracks
+                           target.closest('.library-song-item') ||     // Library browser
+                           target.closest('[data-item-id]') ||         // Any item with data attributes
+                           target.closest('.c-listitem-short') ||      // Search and Artist page
+                           target.closest('.track-item') ||            // Track items
+                           target.closest('.song-item') ||             // Song items
+                           target.closest('[data-media-item]') ||      // Generic media items
+                           target.closest('.media-item') ||            // Alternative media items
+                           target.closest('.album-track');             // Album view tracks
           
           if (mediaItem) {
             console.log("Found media item element:", mediaItem);
@@ -275,6 +291,27 @@ const { plugin, customElementName } = definePluginContext({
               const itemId = element.dataset.itemId;
               const itemType = element.dataset.itemType || 'library-songs';
               
+              // Check if this is a library browser item (.library-song-item)
+              if (element.classList.contains('library-song-item')) {
+                // Library browser has a different DOM structure
+                const titleEl = element.querySelector('.content-title .title-text');
+                const artistEl = element.querySelector('.content-artist');
+                const albumEl = element.querySelector('.albumLink');
+                const artworkImg = element.querySelector('.fcol[fcol-type="artwork"] img');
+                
+                songData = {
+                  id: itemId,
+                  type: itemType,
+                  attributes: {
+                    name: titleEl?.textContent?.trim() || 'Unknown Song',
+                    artistName: artistEl?.textContent?.trim() || 'Unknown Artist',
+                    albumName: albumEl?.textContent?.trim() || '',
+                    artwork: artworkImg ? { url: (artworkImg as HTMLImageElement).src } : undefined,
+                  },
+                };
+                
+                console.log("Extracted song data from library browser:", songData);
+              } else {
               // Get the title and artist from the DOM
               // In album view, the artist might be in the album header, not in each track
               const titleElement = element.querySelector('.title-section .title-text') ||
@@ -427,6 +464,7 @@ const { plugin, customElementName } = definePluginContext({
               };
               
               console.log("Extracted song data from DOM:", songData);
+              }
             } else {
               // For search/artist view items without data-item-id, try to construct from available data
               const titleEl = element.querySelector('.content-title .title-text');
@@ -593,13 +631,17 @@ const { plugin, customElementName } = definePluginContext({
     // This will attempt to inject a button next to the "..." menu on each track
     function addInlineButtons() {
       // Find all track items that don't already have our button
-      // Include both PlaylistTrack and AlbumTrack
+      // Only add to PlaylistTrack and AlbumTrack views
       const tracks = document.querySelectorAll('.ri-list-item:not([data-playlist-btn])');
       
       tracks.forEach((track) => {
         const element = track as HTMLElement;
-        // In album view, there's no .menu-section, just a direct button container
-        let menuSection = element.querySelector('.menu-section');
+        
+        // Different views have different structures
+        let menuSection = null;
+        
+        // For playlist/album views (.ri-list-item)
+        menuSection = element.querySelector('.menu-section');
         
         // For album view, look for the container with the menu button
         if (!menuSection) {
@@ -617,9 +659,12 @@ const { plugin, customElementName } = definePluginContext({
           const btn = document.createElement('button');
           btn.className = 'menu-btn passive-button playlist-mgr-btn';
           btn.innerHTML = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15V6"></path>
+              <path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"></path>
+              <path d="M12 12H3"></path>
+              <path d="M16 6H3"></path>
+              <path d="M12 18H3"></path>
             </svg>
           `;
           btn.title = 'Add to Playlist';
@@ -629,6 +674,9 @@ const { plugin, customElementName } = definePluginContext({
             
             // Extract song data from the track element
             let songId = element.dataset.itemId;
+            
+            // Library browser has data-item-id set, so it should work
+            // No special handling needed for library-song-item
             
             // In album view, try to get the ID from other attributes or Vue data
             if (!songId) {
@@ -880,14 +928,13 @@ const { plugin, customElementName } = definePluginContext({
         justify-content: center !important;
         border-radius: 4px;
         pointer-events: none;
-        /* Position it where the time/duration is */
         top: 50%;
         transform: translateY(-50%);
       }
       
       /* For playlist view - time-section is before menu-section */
       [sfc-name="PlaylistTrack"] .playlist-mgr-btn {
-        right: 52px; /* Account for the menu button width + gap */
+        right: 52px;
       }
       
       /* For album view - time is a direct child before the menu wrapper */

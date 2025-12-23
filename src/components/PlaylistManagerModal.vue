@@ -590,6 +590,13 @@ function closeModal() {
 
   emits("dialogClose");
 }
+
+function refreshPlaylists() {
+  // Clear cache for all playlists to force refresh
+  PlaylistCache.clearCache();
+  // Reload playlists
+  loadPlaylists();
+}
 </script>
 
 <template>
@@ -619,8 +626,23 @@ function closeModal() {
           class="search-input"
           placeholder="Search playlists..."
         />
-        <div v-if="cacheUsed && !loading" class="cache-indicator" title="Using cached data">
-          ⚡
+        <div class="search-icons">
+          <button 
+            v-if="!loading"
+            class="icon-btn refresh-btn" 
+            @click="refreshPlaylists"
+            title="Refresh all playlists"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
+              <g fill="currentColor">
+                <path d="M9,17c-4.411,0-8-3.589-8-8S4.589,1,9,1c3.164,0,6.037,1.87,7.318,4.764,.168,.379-.003,.822-.382,.989-.379,.168-.821-.003-.989-.382-1.042-2.352-3.376-3.872-5.947-3.872-3.584,0-6.5,2.916-6.5,6.5s2.916,6.5,6.5,6.5c2.155,0,4.167-1.066,5.38-2.851,.233-.344,.701-.431,1.042-.199,.343,.232,.432,.699,.199,1.042-1.493,2.197-3.967,3.508-6.62,3.508Z"></path>
+                <path d="M15.713,7c-.034,0-.069-.002-.104-.007l-2.944-.407c-.411-.057-.697-.436-.641-.846,.057-.41,.437-.693,.846-.641l2.201,.305,.305-2.202c.056-.41,.428-.699,.846-.64,.41,.057,.697,.435,.64,.846l-.408,2.945c-.052,.375-.373,.647-.742,.647Z"></path>
+              </g>
+            </svg>
+          </button>
+          <div v-if="cacheUsed && !loading" class="cache-indicator" title="Using cached data">
+            ⚡
+          </div>
         </div>
       </div>
 
@@ -769,12 +791,48 @@ function closeModal() {
   padding-right: 16px;
   width: calc(100% + 32px);
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-icons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  padding: 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  opacity: 0.6;
+  transition: all 0.2s;
+}
+
+.icon-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.icon-btn:active {
+  transform: scale(0.95);
+}
+
+.refresh-btn svg {
+  width: 16px;
+  height: 16px;
 }
 
 .search-input {
-  width: 100%;
+  flex: 1;
   padding: 8px 12px;
-  padding-right: 36px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.05);
@@ -790,13 +848,11 @@ function closeModal() {
 }
 
 .cache-indicator {
-  position: absolute;
-  right: 24px;
-  top: 50%;
-  transform: translateY(-50%);
   font-size: 18px;
   opacity: 0.6;
   animation: fadeIn 0.3s ease-in;
+  display: flex;
+  align-items: center;
 }
 
 @keyframes fadeIn {
