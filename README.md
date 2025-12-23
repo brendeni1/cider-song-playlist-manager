@@ -4,9 +4,10 @@ A powerful Cider plugin that makes managing your Apple Music playlists effortles
 
 ## Features
 
-### 🎯 Inline "Add to Playlist" Button
 
-Hover over any track to reveal a quick-access button that lets you add songs to multiple playlists instantly.
+### 🎯 Inline "Add to Playlist" Button and Replaces Native Cider Button For Now Playing Songs
+
+Hover over any track to reveal a quick-access button that lets you add songs to multiple playlists instantly. You can also add to a playlist by using the native "Add to Playlist" button in Cider on a now playing song.
 
 ![Inline Add to Playlist Button](images/inline-button.png)
 

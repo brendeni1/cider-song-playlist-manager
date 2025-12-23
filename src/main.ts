@@ -906,6 +906,161 @@ const { plugin, customElementName } = definePluginContext({
       subtree: true,
     });
     
+    /**
+     * Intercept the native "Add to Playlist" button in the now playing controls
+     * and replace it with our custom modal
+     */
+    function interceptAddToPlaylistButton() {
+      // Find the native Add to Playlist button using the selector you provided
+      const addToPlaylistBtn = document.querySelector('#lcdplayer-controls-listen > div.item-actions.item-actions-glass > button:nth-child(3)') as HTMLElement;
+      
+      if (addToPlaylistBtn && !addToPlaylistBtn.dataset.intercepted) {
+        console.log('Found native Add to Playlist button, intercepting...');
+        
+        // Mark as intercepted
+        addToPlaylistBtn.dataset.intercepted = 'true';
+        
+        // Remove any existing click handlers by cloning the element
+        const newBtn = addToPlaylistBtn.cloneNode(true) as HTMLElement;
+        addToPlaylistBtn.parentNode?.replaceChild(newBtn, addToPlaylistBtn);
+        
+        // Add our custom click handler
+        newBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          console.log('Add to Playlist button clicked, getting current track...');
+          
+          // Get the currently playing track from the now playing div
+          const nowPlayingDiv = document.querySelector('.lcdplayer-info');
+          
+          if (!nowPlayingDiv) {
+            console.error('Could not find now playing div');
+            DialogAPI.createAlert('Unable to find currently playing track.');
+            return;
+          }
+          
+          // Extract song information from the now playing UI
+          const songNameEl = nowPlayingDiv.querySelector('.song-name');
+          const releaseInfoEl = nowPlayingDiv.querySelector('.release-info');
+          
+          // Parse the release info which contains "Album - Artist"
+          const releaseInfoText = releaseInfoEl?.textContent?.trim() || '';
+          const [albumName, artistName] = releaseInfoText.split(' - ').map(s => s.trim());
+          
+          const songTitle = songNameEl?.textContent?.trim() || 'Unknown Song';
+          const artist = artistName || 'Unknown Artist';
+          const album = albumName || '';
+          
+          // Get artwork URL - try multiple sources
+          let artworkUrl = '';
+          
+          // Try to get from picture source (higher quality)
+          const pictureSource = nowPlayingDiv.querySelector('.artwork picture source');
+          if (pictureSource) {
+            const srcset = (pictureSource as HTMLSourceElement).srcset;
+            if (srcset && !srcset.includes('data:image/svg')) {
+              // Extract the highest quality URL from srcset
+              const urls = srcset.split(',').map(s => s.trim().split(' ')[0]);
+              artworkUrl = urls[urls.length - 1] || urls[0];
+            }
+          }
+          
+          // Fallback to img tag
+          if (!artworkUrl) {
+            const artworkImg = nowPlayingDiv.querySelector('.artwork img');
+            if (artworkImg) {
+              const imgSrc = (artworkImg as HTMLImageElement).src || '';
+              if (!imgSrc.includes('data:image/svg')) {
+                artworkUrl = imgSrc;
+              }
+            }
+          }
+          
+          // Final fallback: try to get from MusicKit nowPlayingItem
+          if (!artworkUrl) {
+            const musicKit = (window as any).MusicKit?.getInstance();
+            if (musicKit?.nowPlayingItem?.attributes?.artwork?.url) {
+              const artworkTemplate = musicKit.nowPlayingItem.attributes.artwork.url;
+              artworkUrl = artworkTemplate
+                .replace('{w}', '300')
+                .replace('{h}', '300')
+                .replace('{f}', 'jpg');
+            }
+          }
+          
+          // Try to get the song ID from MusicKit
+          const musicKit = (window as any).MusicKit?.getInstance();
+          let songId = '';
+          
+          if (musicKit?.nowPlayingItem) {
+            const nowPlaying = musicKit.nowPlayingItem;
+            songId = nowPlaying.id ||
+                    nowPlaying.attributes?.playParams?.catalogId ||
+                    nowPlaying.attributes?.playParams?.id ||
+                    nowPlaying.catalogId ||
+                    '';
+          }
+          
+          // Fallback: try app state
+          if (!songId) {
+            const app = (window as any).app;
+            if (app?.chrome?.store?.state?.mediaItem) {
+              const mediaItem = app.chrome.store.state.mediaItem;
+              songId = mediaItem.id ||
+                      mediaItem.attributes?.playParams?.catalogId ||
+                      mediaItem.attributes?.playParams?.id ||
+                      '';
+            }
+          }
+          
+          // Fallback: try Cider internal state
+          if (!songId) {
+            const cider = (window as any).Cider;
+            if (cider?.playback?.currentTrack) {
+              const track = cider.playback.currentTrack;
+              songId = track.id ||
+                      track.attributes?.playParams?.catalogId ||
+                      track.attributes?.playParams?.id ||
+                      '';
+            }
+          }
+          
+          console.log('Extracted current track:', { songId, songTitle, artist, album, artworkUrl });
+          
+          if (!songId) {
+            console.error('Could not extract song ID from now playing');
+            DialogAPI.createAlert('Unable to identify the currently playing song. Please try using the context menu on the song instead.');
+            return;
+          }
+          
+          // Open the playlist manager modal
+          openPlaylistManagerModal(
+            songId,
+            songTitle,
+            artist,
+            album,
+            artworkUrl
+          );
+        });
+        
+        console.log('Successfully intercepted Add to Playlist button');
+      }
+    }
+    
+    // Run on load
+    setTimeout(interceptAddToPlaylistButton, 1000);
+    
+    // Watch for button to appear (in case it loads late)
+    const btnObserver = new MutationObserver(() => {
+      interceptAddToPlaylistButton();
+    });
+    
+    btnObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+    
     // Add CSS for inline buttons
     const style = document.createElement('style');
     style.textContent = `
