@@ -245,8 +245,8 @@ async function loadPlaylists() {
       PlaylistCache.clearModifiedPlaylists();
     }
 
-    // Sort by name for display
-    playlistStates.sort((a, b) => a.name.localeCompare(b.name));
+    // Keep playlists sorted by last modified date (already sorted earlier)
+    // playlistStates is already in the right order from sortedPlaylists
     playlists.value = playlistStates;
     
     if (!aborted.value) {
