@@ -62,6 +62,31 @@ const { plugin, customElementName } = definePluginContext({
     this.SettingsElement = customElementName("settings-modal");
 
     /**
+     * Helper function to parse album names that may contain " - EP", " - Single", etc.
+     * Takes everything except the last segment after " - " if it's a known suffix
+     */
+    function parseAlbumName(fullText: string): string {
+      if (!fullText) return '';
+      
+      const text = fullText.trim();
+      const knownSuffixes = ['EP', 'Single', 'Album', 'Deluxe', 'Remastered', 'Live', 'Acoustic'];
+      
+      // Check if it contains " - "
+      if (text.includes(' - ')) {
+        const parts = text.split(' - ');
+        const lastPart = parts[parts.length - 1].trim();
+        
+        // If the last part is a known suffix, use everything before it
+        if (knownSuffixes.includes(lastPart)) {
+          return parts.slice(0, -1).join(' - ').trim();
+        }
+      }
+      
+      // Otherwise return as-is (it might be "Artist - Album" format)
+      return text;
+    }
+
+    /**
      * Function to open the modal with song data
      */
     function openPlaylistManagerModal(songId: string | number, songTitle: string, songArtist: string, songAlbum?: string, songArtwork?: string) {
@@ -456,10 +481,10 @@ const { plugin, customElementName } = definePluginContext({
                 id: itemId,
                 type: itemType,
                 attributes: {
-                  name: titleElement?.textContent?.trim() || 'Unknown Song',
-                  artistName: artistElement?.textContent?.trim() || 'Unknown Artist',
-                  albumName: albumElement?.textContent?.trim().split('·')[0].trim() || '',
-                  artwork: artworkUrl ? { url: artworkUrl } : undefined,
+                name: titleElement?.textContent?.trim() || 'Unknown Song',
+                artistName: artistElement?.textContent?.trim() || 'Unknown Artist',
+                albumName: parseAlbumName(albumElement?.textContent?.trim() || ''),
+                artwork: artworkUrl ? { url: artworkUrl } : undefined,
                 },
               };
               
@@ -490,7 +515,7 @@ const { plugin, customElementName } = definePluginContext({
                   attributes: {
                     name: titleEl.textContent?.trim() || 'Unknown Song',
                     artistName: artistEl?.textContent?.trim() || 'Unknown Artist',
-                    albumName: albumEl?.textContent?.trim().split('·')[0].trim() || '',
+                    albumName: parseAlbumName(albumEl?.textContent?.trim() || ''),
                     artwork: artworkUrl ? { url: artworkUrl } : undefined,
                   },
                 };
@@ -812,9 +837,7 @@ const { plugin, customElementName } = definePluginContext({
               if (!albumText) {
                 const contentAlbum = element.querySelector('.content-album');
                 if (contentAlbum?.textContent?.trim()) {
-                  // Extract just the album name (remove year if present)
-                  const fullText = contentAlbum.textContent.trim();
-                  albumText = fullText.split('·')[0].trim();
+                  albumText = parseAlbumName(contentAlbum.textContent.trim());
                 }
               }
             }

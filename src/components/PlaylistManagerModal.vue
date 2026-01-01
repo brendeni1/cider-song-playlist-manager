@@ -31,10 +31,24 @@ const aborted = ref(false);
 const cacheUsed = ref(false);
 
 const filteredPlaylists = computed(() => {
-  if (!searchQuery.value) return playlists.value;
-
-  const query = searchQuery.value.toLowerCase();
-  return playlists.value.filter((p) => p.name.toLowerCase().includes(query));
+  let filtered = playlists.value;
+  
+  if (searchQuery.value) {
+    const query = searchQuery.value.toLowerCase();
+    filtered = playlists.value.filter((p) => p.name.toLowerCase().includes(query));
+  }
+  
+  // Sort: playlists with the song first, then by last modified date
+  return [...filtered].sort((a, b) => {
+    // First, sort by whether the song is in the playlist
+    if (a.isInPlaylist && !b.isInPlaylist) return -1;
+    if (!a.isInPlaylist && b.isInPlaylist) return 1;
+    
+    // If both have the song or both don't, sort by last modified date
+    const dateA = a.lastModified?.getTime() || 0;
+    const dateB = b.lastModified?.getTime() || 0;
+    return dateB - dateA;
+  });
 });
 
 const hasChanges = computed(() => {
@@ -245,8 +259,18 @@ async function loadPlaylists() {
       PlaylistCache.clearModifiedPlaylists();
     }
 
-    // Keep playlists sorted by last modified date (already sorted earlier)
-    // playlistStates is already in the right order from sortedPlaylists
+    // Sort playlists: those with the song first, then by last modified date
+    playlistStates.sort((a, b) => {
+      // First, sort by whether the song is in the playlist
+      if (a.isInPlaylist && !b.isInPlaylist) return -1;
+      if (!a.isInPlaylist && b.isInPlaylist) return 1;
+      
+      // If both have the song or both don't, sort by last modified date
+      const dateA = a.lastModified?.getTime() || 0;
+      const dateB = b.lastModified?.getTime() || 0;
+      return dateB - dateA;
+    });
+
     playlists.value = playlistStates;
     
     if (!aborted.value) {
@@ -413,6 +437,9 @@ async function applyChanges() {
       } else {
         await removeSongFromPlaylist(playlist.id);
       }
+      
+      // Update the original state immediately after successful operation
+      playlist.originalState = playlist.isInPlaylist;
       
       if (i < changes.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 200));
