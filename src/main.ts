@@ -968,8 +968,20 @@ const { plugin, customElementName } = definePluginContext({
           const releaseInfoEl = nowPlayingDiv.querySelector('.release-info');
           
           // Parse the release info which contains "Album - Artist"
+          // For albums like "The Pines - EP", we want the LAST segment as artist
+          // and everything before as the album name
           const releaseInfoText = releaseInfoEl?.textContent?.trim() || '';
-          const [albumName, artistName] = releaseInfoText.split(' - ').map(s => s.trim());
+          let albumName = '';
+          let artistName = '';
+          
+          if (releaseInfoText.includes(' - ')) {
+            const parts = releaseInfoText.split(' - ');
+            // Last part is the artist, everything else is the album
+            artistName = parts[parts.length - 1].trim();
+            albumName = parts.slice(0, -1).join(' - ').trim();
+          } else {
+            albumName = releaseInfoText;
+          }
           
           const songTitle = songNameEl?.textContent?.trim() || 'Unknown Song';
           const artist = artistName || 'Unknown Artist';
