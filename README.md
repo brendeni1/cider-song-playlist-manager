@@ -2,6 +2,8 @@
 
 A powerful Cider plugin that makes managing your Apple Music playlists effortless with an intuitive inline interface and batch playlist operations.
 
+### This plugin has been updated for ***Cider 4.X!*** Use an old release for 3.X!!
+
 ## Features
 
 
@@ -108,7 +110,7 @@ By using this plugin, you acknowledge that you do so at your own risk. Always ma
 
 ## Compatibility
 
-- **Cider Version**: 2.0.0+
+- **Cider Version**: 4.X.X
 - **Apple Music**: Requires an active Apple Music subscription
 - **Platforms**: Windows, macOS, Linux
 

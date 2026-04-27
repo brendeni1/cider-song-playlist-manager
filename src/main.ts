@@ -963,24 +963,27 @@ const { plugin, customElementName } = definePluginContext({
             return;
           }
           
-          // Extract song information from the now playing UI
+          // Extract song information — prefer musicKitStore, fall back to DOM
+          const mkStoreMeta = (window as any).CiderApp?.musicKitStore;
+          const nowPlayingMeta = mkStoreMeta?.nowPlayingItemMediaItem;
+          
           const songNameEl = nowPlayingDiv.querySelector('.song-name');
-          const releaseInfoEl = nowPlayingDiv.querySelector('.release-info');
+          // .release-info has two <span class="link"> children: album then artist
+          const releaseSpans = nowPlayingDiv.querySelectorAll('.release-info .link');
           
-          // Parse the release info which contains "Album - Artist"
-          // For albums like "The Pines - EP", we want the LAST segment as artist
-          // and everything before as the album name
-          const releaseInfoText = releaseInfoEl?.textContent?.trim() || '';
-          let albumName = '';
-          let artistName = '';
+          let albumName = nowPlayingMeta?.attributes?.albumName ||
+                          (releaseSpans[0]?.textContent?.trim()) || '';
+          let artistName = nowPlayingMeta?.attributes?.artistName ||
+                           (releaseSpans[releaseSpans.length - 1]?.textContent?.trim()) || '';
           
-          if (releaseInfoText.includes(' - ')) {
-            const parts = releaseInfoText.split(' - ');
-            // Last part is the artist, everything else is the album
-            artistName = parts[parts.length - 1].trim();
-            albumName = parts.slice(0, -1).join(' - ').trim();
-          } else {
-            albumName = releaseInfoText;
+          // Final fallback: parse raw text
+          if (!artistName) {
+            const releaseInfoText = nowPlayingDiv.querySelector('.release-info')?.textContent?.trim() || '';
+            if (releaseInfoText.includes(' - ')) {
+              const parts = releaseInfoText.split(' - ');
+              artistName = parts[parts.length - 1].trim();
+              albumName = albumName || parts.slice(0, -1).join(' - ').trim();
+            }
           }
           
           const songTitle = songNameEl?.textContent?.trim() || 'Unknown Song';
@@ -1012,51 +1015,41 @@ const { plugin, customElementName } = definePluginContext({
             }
           }
           
-          // Final fallback: try to get from MusicKit nowPlayingItem
+          // Fallback: try artwork from musicKitStore
           if (!artworkUrl) {
-            const musicKit = (window as any).MusicKit?.getInstance();
-            if (musicKit?.nowPlayingItem?.attributes?.artwork?.url) {
-              const artworkTemplate = musicKit.nowPlayingItem.attributes.artwork.url;
+            const mkStore = (window as any).CiderApp?.musicKitStore;
+            const artworkTemplate = mkStore?.nowPlayingItemMediaItem?.attributes?.artwork?.url ||
+                                    mkStore?.player?.nowPlayingItem?.attributes?.artwork?.url;
+            if (artworkTemplate) {
               artworkUrl = artworkTemplate
                 .replace('{w}', '300')
                 .replace('{h}', '300')
-                .replace('{f}', 'jpg');
+                .replace('{f}', 'jpg')
+                .replace('.{f}', '.jpg');
             }
           }
           
-          // Try to get the song ID from MusicKit
-          const musicKit = (window as any).MusicKit?.getInstance();
+          // Get song ID from CiderApp.musicKitStore (MusicKit not available in plugin sandbox)
           let songId = '';
+          const mkStore = (window as any).CiderApp?.musicKitStore;
           
-          if (musicKit?.nowPlayingItem) {
-            const nowPlaying = musicKit.nowPlayingItem;
-            songId = nowPlaying.id ||
-                    nowPlaying.attributes?.playParams?.catalogId ||
-                    nowPlaying.attributes?.playParams?.id ||
-                    nowPlaying.catalogId ||
+          // nowPlayingItemMediaItem is the richest source
+          const nowPlayingMediaItem = mkStore?.nowPlayingItemMediaItem;
+          if (nowPlayingMediaItem) {
+            songId = nowPlayingMediaItem.id ||
+                    nowPlayingMediaItem.attributes?.playParams?.catalogId ||
+                    nowPlayingMediaItem.attributes?.playParams?.id ||
                     '';
           }
           
-          // Fallback: try app state
+          // Fallback: player object in the store
           if (!songId) {
-            const app = (window as any).app;
-            if (app?.chrome?.store?.state?.mediaItem) {
-              const mediaItem = app.chrome.store.state.mediaItem;
-              songId = mediaItem.id ||
-                      mediaItem.attributes?.playParams?.catalogId ||
-                      mediaItem.attributes?.playParams?.id ||
-                      '';
-            }
-          }
-          
-          // Fallback: try Cider internal state
-          if (!songId) {
-            const cider = (window as any).Cider;
-            if (cider?.playback?.currentTrack) {
-              const track = cider.playback.currentTrack;
-              songId = track.id ||
-                      track.attributes?.playParams?.catalogId ||
-                      track.attributes?.playParams?.id ||
+            const player = mkStore?.player;
+            const item = player?.nowPlayingItem || player?.currentItem || player?._nowPlayingItem;
+            if (item) {
+              songId = item.id ||
+                      item.attributes?.playParams?.catalogId ||
+                      item.attributes?.playParams?.id ||
                       '';
             }
           }
@@ -1180,6 +1173,32 @@ const { plugin, customElementName } = definePluginContext({
           width: 14px;
           height: 14px;
         }
+      }
+
+      /* ── Strip the grey shell Cider wraps around our modal ──
+       * The real host is <dialog class="plugin-base-modal">.
+       * We also zero out the inner .modal-content / .plugin-base div
+       * just in case Cider's theme adds paint there too.
+       */
+      dialog.plugin-base-modal:has(.playlist-manager-modal),
+      dialog.plugin-base-modal:has(.settings-modal) {
+        background: transparent !important;
+        box-shadow: none !important;
+        border: none !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+      }
+
+      /* Belt-and-suspenders: inner wrapper that Vue mounts onto */
+      .modal-content.plugin-base:has(.playlist-manager-modal),
+      .modal-content.plugin-base:has(.settings-modal) {
+        background: transparent !important;
+        box-shadow: none !important;
+        border: none !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
       }
     `;
     document.head.appendChild(style);

@@ -124,6 +124,9 @@ function closeModal() {
 
 <template>
   <div class="settings-modal" :class="{ 'modal-content plugin-base': isStandalone, 'embedded-settings': !isStandalone }">
+    <!-- Background gradient layer (only in standalone modal mode) -->
+    <div v-if="isStandalone" class="modal-bg-gradient-settings" aria-hidden="true" />
+
     <cider-modal-title-bar
       v-if="isStandalone"
       title="Playlist Manager Settings"
@@ -258,20 +261,99 @@ function closeModal() {
 </template>
 
 <style scoped>
+/* ─── Enter animation (matches PlaylistManagerModal) ─── */
+@keyframes modalEnter {
+  from {
+    opacity: 0;
+    transform: translateY(10%);
+    filter: blur(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
 .settings-modal.modal-content {
   height: 600px;
   width: 500px;
   display: grid;
   grid-template-rows: auto 1fr auto;
-  background: var(--glass_backgroundColor, #1a1a1a);
-  border-radius: 12px;
+  border-radius: 14px;
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
+
+  animation: modalEnter 0.35s var(--ease_appleSpring, cubic-bezier(0.25, 0.46, 0.45, 0.94)) both;
+  will-change: opacity, transform, filter;
+
+  /* Iridescent accent border — same as PlaylistManagerModal */
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 1px solid transparent;
+    border-radius: inherit;
+    background: linear-gradient(
+        -70deg,
+        var(--keyColor, white),
+        color-mix(in srgb, var(--keyColor, white) 60%, white),
+        var(--keyColor, white)
+      )
+      border-box;
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    opacity: 0.45;
+    filter: saturate(380%) contrast(100%) brightness(130%);
+    z-index: 10;
+  }
+}
+
+/* ─── Blurred backdrop ─── */
+.settings-modal.modal-content::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  backdrop-filter: blur(60px) saturate(380%) brightness(50%);
+  z-index: -2;
+  border-radius: inherit;
+
+  body.body--light & {
+    backdrop-filter: blur(60px) saturate(380%) brightness(100%);
+  }
 }
 
 .settings-modal.embedded-settings {
   width: 100%;
   max-width: 800px;
   margin: 0 auto;
+}
+
+/* ─── Background gradient tint (uses keyColor as fallback accent) ─── */
+.settings-modal.modal-content .modal-bg-gradient-settings {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--keyColor, rgb(30,0,0)) 25%, rgb(0,0,0)) 0%,
+    rgb(0,0,0) 100%
+  );
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+
+  body.body--light & {
+    background: linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--keyColor, rgb(240,232,232)) 20%, rgba(255,255,255,0.9)) 0%,
+      rgba(255,255,255,0.8) 100%
+    );
+  }
 }
 
 .settings-header {
@@ -517,8 +599,14 @@ input:checked + .toggle-slider:before {
   justify-content: flex-end;
   gap: 8px;
   padding: 16px 20px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid rgb(255 255 255 / 8%);
+  background: rgb(0 0 0 / 20%);
+  backdrop-filter: blur(20px) saturate(200%) brightness(60%);
+
+  body.body--light & {
+    background: rgb(255 255 255 / 30%);
+    backdrop-filter: blur(20px) saturate(200%) brightness(110%);
+  }
 }
 
 .embedded-footer {
@@ -529,28 +617,36 @@ input:checked + .toggle-slider:before {
 
 .c-btn {
   padding: 8px 20px;
-  border-radius: 6px;
-  border: none;
+  border-radius: 8px;
+  border: 1px solid rgb(255 255 255 / 10%);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgb(255 255 255 / 8%);
   color: inherit;
+  backdrop-filter: blur(10px);
 }
 
 .c-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgb(255 255 255 / 14%);
+  border-color: rgb(255 255 255 / 18%);
+}
+
+.c-btn:active {
+  transform: scale(0.97);
 }
 
 .c-btn.primary {
-  background: var(--keyColor, #ff0033);
+  background: color-mix(in srgb, var(--keyColor, #ff0033) 65%, black 35%);
+  border: 1px solid color-mix(in srgb, var(--keyColor, #ff0033) 80%, white 20%);
   color: white;
 }
 
 .c-btn.primary:hover {
-  opacity: 0.9;
+  background: color-mix(in srgb, var(--keyColor, #ff0033) 80%, white 20%);
   transform: translateY(-1px);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--keyColor, #ff0033) 50%, transparent);
 }
 
 .save-btn {

@@ -23,7 +23,7 @@ const MODIFIED_PLAYLISTS_KEY = 'playlist-manager-modified';
 export class PlaylistCache {
   private static defaultSettings: CacheSettings = {
     enabled: true,
-    expirationMinutes: 5,
+    expirationMinutes: 60,
   };
 
   /**
@@ -106,13 +106,23 @@ export class PlaylistCache {
   }
 
   /**
-   * Check if a song is in a cached playlist
+   * Check if a song is in a cached playlist.
+   * Uses the same fuzzy ID matching as the fetch path so cache hits are accurate.
    */
   static isSongInPlaylist(playlistId: string, songId: string): boolean | null {
     const playlist = this.getCachedPlaylist(playlistId);
     if (!playlist) return null;
 
-    return playlist.tracks.includes(songId);
+    const cleanSearch = songId.replace(/^i\./, '');
+    return playlist.tracks.some(trackId => {
+      const cleanTrack = trackId.replace(/^i\./, '');
+      return trackId === songId ||
+             cleanTrack === cleanSearch ||
+             trackId.includes(songId) ||
+             songId.includes(trackId) ||
+             cleanTrack.includes(cleanSearch) ||
+             cleanSearch.includes(cleanTrack);
+    });
   }
 
   /**

@@ -12,6 +12,7 @@ export default {
     version: '1.3.0',
     author: 'brenden.i1',
     repo: 'https://github.com/brendeni1/cider-song-playlist-manager',
+    pluginKitVersion: '0.0.13',
     entry: {
         'plugin.js': {
             type: 'main',
