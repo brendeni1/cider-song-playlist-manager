@@ -535,7 +535,25 @@ async function addSongToPlaylist(playlistId: string) {
       throw new Error("musicKitStore.addToPlaylist not available");
     }
 
-    await store.addToPlaylist(playlistId, [{ id: String(props.songId), type: "songs" }]);
+    // If this is a catalog song (no 'i.' prefix), check if it's already in the
+    // library. If it is, use the library ID + type so Apple Music doesn't add
+    // it to the library a second time for each playlist we put it in.
+    let addId = String(props.songId);
+    let addType: string = "songs";
+
+    if (!addId.startsWith("i.")) {
+      const libraryId = await findLibraryId(addId);
+      if (libraryId) {
+        addId = libraryId;
+        addType = "library-songs";
+        console.log(`[PlaylistManager] Song already in library as ${libraryId}, using library-songs type`);
+      }
+    } else {
+      // Already a library ID
+      addType = "library-songs";
+    }
+
+    await store.addToPlaylist(playlistId, [{ id: addId, type: addType }]);
     console.log(`[PlaylistManager] Added to ${playlistId}`);
   } catch (error) {
     console.error(`Error adding song to playlist ${playlistId}:`, error);
