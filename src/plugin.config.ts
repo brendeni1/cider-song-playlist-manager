@@ -9,7 +9,7 @@ export default {
     identifier: 'brendeni1.song-playlist-manager',
     name: 'Song Playlist Manager',
     description: 'Manage songs in playlists with a convenient modal interface w/ checklists.',
-    version: '1.3.0',
+    version: '2.0.2',
     author: 'brenden.i1',
     repo: 'https://github.com/brendeni1/cider-song-playlist-manager',
     pluginKitVersion: '0.0.13',

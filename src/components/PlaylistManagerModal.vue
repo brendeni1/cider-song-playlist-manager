@@ -213,11 +213,13 @@ onMounted(async () => {
 });
 
 /**
- * Try to find the library ID for a catalog song
+ * Try to find the library ID for a catalog song.
+ * Uses filter[id] bracket notation — passing a nested object produces
+ * filter=[object Object] which the API rejects with 400.
  */
 async function findLibraryId(catalogId: string): Promise<string | null> {
   try {
-    const response = await v3<any>(`/v1/me/library/songs`, { filter: { id: catalogId }, limit: 1 });
+    const response = await v3<any>(`/v1/me/library/songs`, { 'filter[id]': catalogId, limit: 1 });
     const songs = Array.isArray(response.data) ? response.data : response.data?.data || [];
     if (songs.length > 0 && songs[0].id) return songs[0].id;
   } catch { /* not in library */ }
@@ -387,7 +389,8 @@ async function loadPlaylists() {
     
     if (!aborted.value) {
       const inCount = playlistStates.filter((p) => p.isInPlaylist).length;
-      console.log(`[PlaylistManager] ${props.songTitle}: in ${inCount}/${playlistStates.length} playlists, ${cacheHits} from cache`);
+      const src = cacheHits === playlistStates.length ? 'cache' : cacheHits > 0 ? `${cacheHits} cached` : 'live';
+      console.log(`[PlaylistManager] "${props.songTitle}" — ${inCount}/${playlistStates.length} playlists [${src}]`);
     }
   } catch (error) {
     console.error("Error loading playlists:", error);
@@ -399,18 +402,41 @@ async function loadPlaylists() {
   }
 }
 
+function normalizeId(id: string): string {
+  // Strip the library prefix (i.) and any trailing version/variant suffix
+  // e.g. "i.abc123" -> "abc123", "1234567890" -> "1234567890"
+  return id.replace(/^i\./, '').toLowerCase().trim();
+}
+
 function trackMatchesSearchIds(track: any, searchIds: string[]): boolean {
-  const libraryId = String(track.id || track.attributes?.playParams?.id || "");
-  const catalogId = String(track.attributes?.playParams?.catalogId || track.attributes?.playParams?.reportingId || "");
+  // Collect every plausible ID from the track object
+  const rawIds: string[] = [
+    track.id,
+    track.attributes?.playParams?.id,
+    track.attributes?.playParams?.catalogId,
+    track.attributes?.playParams?.reportingId,
+    track.attributes?.playParams?.globalId,
+    track.attributes?.isrc,
+  ]
+    .filter(Boolean)
+    .map(String);
+
+  const trackIds = rawIds.map(normalizeId).filter(Boolean);
+
   return searchIds.some(searchId => {
-    const clean = searchId.replace(/^i\./, '');
-    return [libraryId, catalogId].some(tid => {
-      if (!tid) return false;
-      const cleanTid = tid.replace(/^i\./, '');
-      return tid === searchId || cleanTid === clean ||
-             tid.includes(searchId) || searchId.includes(tid) ||
-             cleanTid.includes(clean) || clean.includes(cleanTid);
-    });
+    if (!searchId) return false;
+    const cleanSearch = normalizeId(searchId);
+
+    // 1. Exact match (normalized)
+    if (trackIds.some(tid => tid === cleanSearch)) return true;
+
+    // 2. One contains the other (handles "1234567890" vs "i.1234567890" after stripping)
+    if (trackIds.some(tid => tid.includes(cleanSearch) || cleanSearch.includes(tid))) return true;
+
+    // 3. Raw (un-normalized) equality — last resort for unusual formats
+    if (rawIds.some(tid => tid === searchId)) return true;
+
+    return false;
   });
 }
 
@@ -459,7 +485,6 @@ async function checkSongInPlaylistWithCache(
 
         if (tracks.length < limit) break;
         offset += limit;
-        if (offset > 1000) break;
       } catch {
         break;
       }
@@ -507,17 +532,92 @@ async function applyChanges() {
       (p) => p.isInPlaylist !== p.originalState
     );
 
-    // Apply all adds and removes concurrently
-    await Promise.all(
-      changes.map(async (playlist) => {
-        if (playlist.isInPlaylist) {
-          await addSongToPlaylist(playlist.id);
-        } else {
-          await removeSongFromPlaylist(playlist.id);
+    const adds = changes.filter((p) => p.isInPlaylist);
+    const removes = changes.filter((p) => !p.isInPlaylist);
+
+    // ── Resolve the canonical add-ID before any concurrent work ──────────────
+    // If we let each concurrent addSongToPlaylist call its own findLibraryId,
+    // they all race: the song isn't in the library yet, every call gets null,
+    // every call uses type "songs", and Apple Music adds it to the library
+    // once per playlist — causing duplicates.
+    let resolvedAddId = String(props.songId);
+    let resolvedAddType: string = "songs";
+
+    if (adds.length > 0) {
+      if (resolvedAddId.startsWith("i.")) {
+        resolvedAddType = "library-songs";
+      } else {
+        const libraryId = await findLibraryId(resolvedAddId);
+        if (libraryId) {
+          resolvedAddId = libraryId;
+          resolvedAddType = "library-songs";
+          console.log(`[PlaylistManager] Song already in library as ${libraryId}, using library-songs type`);
         }
+        // Song is not yet in the library. We MUST NOT add it concurrently as
+        // type "songs" — each concurrent call would trigger its own library
+        // import and create duplicate entries. Instead:
+        //   1. Add to the first playlist sequentially (this imports it).
+        //   2. Re-resolve the library ID now that it exists.
+        //   3. Add to remaining playlists concurrently as "library-songs".
+        else if (adds.length > 1) {
+          console.log(`[PlaylistManager] Song not yet in library; adding to first playlist alone to avoid duplicate imports`);
+          const [firstAdd, ...remainingAdds] = adds;
+          await addSongToPlaylist(firstAdd.id, resolvedAddId, "songs");
+          firstAdd.originalState = firstAdd.isInPlaylist;
+
+          // Give Apple Music a moment to register the import, then re-resolve
+          await new Promise(r => setTimeout(r, 600));
+          const newLibraryId = await findLibraryId(resolvedAddId);
+          if (newLibraryId) {
+            resolvedAddId = newLibraryId;
+            resolvedAddType = "library-songs";
+            console.log(`[PlaylistManager] Song now in library as ${newLibraryId}, using library-songs for remaining adds`);
+          } else {
+            // Still not found — fall back to sequential catalog adds to be safe
+            console.warn(`[PlaylistManager] Library ID still not found after initial add; adding remaining playlists sequentially`);
+            for (const playlist of remainingAdds) {
+              await addSongToPlaylist(playlist.id, resolvedAddId, "songs");
+              playlist.originalState = playlist.isInPlaylist;
+            }
+            await Promise.all(removes.map(async (playlist) => {
+              await removeSongFromPlaylist(playlist.id);
+              playlist.originalState = playlist.isInPlaylist;
+            }));
+            PlaylistCache.markPlaylistsModified(changes.map((p) => p.id));
+            closeModal();
+            return;
+          }
+
+          // Run remaining adds concurrently now that we have a stable library ID
+          await Promise.all([
+            ...remainingAdds.map(async (playlist) => {
+              await addSongToPlaylist(playlist.id, resolvedAddId, resolvedAddType);
+              playlist.originalState = playlist.isInPlaylist;
+            }),
+            ...removes.map(async (playlist) => {
+              await removeSongFromPlaylist(playlist.id);
+              playlist.originalState = playlist.isInPlaylist;
+            }),
+          ]);
+          PlaylistCache.markPlaylistsModified(changes.map((p) => p.id));
+          closeModal();
+          return;
+        }
+        // Only one add — no race possible, proceed normally below
+      }
+    }
+
+    // Apply all adds and removes concurrently, sharing the pre-resolved ID.
+    await Promise.all([
+      ...adds.map(async (playlist) => {
+        await addSongToPlaylist(playlist.id, resolvedAddId, resolvedAddType);
         playlist.originalState = playlist.isInPlaylist;
-      })
-    );
+      }),
+      ...removes.map(async (playlist) => {
+        await removeSongFromPlaylist(playlist.id);
+        playlist.originalState = playlist.isInPlaylist;
+      }),
+    ]);
 
     PlaylistCache.markPlaylistsModified(changes.map((p) => p.id));
     closeModal();
@@ -528,33 +628,18 @@ async function applyChanges() {
   }
 }
 
-async function addSongToPlaylist(playlistId: string) {
+// resolvedId and resolvedType are pre-computed by applyChanges to avoid the
+// race condition where concurrent calls each do their own findLibraryId lookup
+// before the song has been added to the library, causing it to be added N times.
+async function addSongToPlaylist(playlistId: string, resolvedId: string, resolvedType: string) {
   try {
     const store = (window as any).CiderApp?.musicKitStore;
     if (!store?.addToPlaylist) {
       throw new Error("musicKitStore.addToPlaylist not available");
     }
 
-    // If this is a catalog song (no 'i.' prefix), check if it's already in the
-    // library. If it is, use the library ID + type so Apple Music doesn't add
-    // it to the library a second time for each playlist we put it in.
-    let addId = String(props.songId);
-    let addType: string = "songs";
-
-    if (!addId.startsWith("i.")) {
-      const libraryId = await findLibraryId(addId);
-      if (libraryId) {
-        addId = libraryId;
-        addType = "library-songs";
-        console.log(`[PlaylistManager] Song already in library as ${libraryId}, using library-songs type`);
-      }
-    } else {
-      // Already a library ID
-      addType = "library-songs";
-    }
-
-    await store.addToPlaylist(playlistId, [{ id: addId, type: addType }]);
-    console.log(`[PlaylistManager] Added to ${playlistId}`);
+    await store.addToPlaylist(playlistId, [{ id: resolvedId, type: resolvedType }]);
+    console.log(`[PlaylistManager] Added ${resolvedId} (${resolvedType}) to ${playlistId}`);
   } catch (error) {
     console.error(`Error adding song to playlist ${playlistId}:`, error);
     throw error;
@@ -582,7 +667,6 @@ async function removeSongFromPlaylist(playlistId: string) {
         allTracks = allTracks.concat(tracks);
         hasMore = tracks.length === limit;
         offset += limit;
-        if (offset > 1000) break;
       } catch {
         hasMore = false;
         break;
@@ -897,8 +981,8 @@ function refreshPlaylists() {
 .song-info {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 20px 0 18px;
+  gap: 16px;
+  padding: 12px 0 16px;
   border-bottom: 1px solid rgb(255 255 255 / 10%);
   animation: modalEnter 0.35s var(--ease_appleSpring, cubic-bezier(0.25, 0.46, 0.45, 0.94)) both;
   animation-delay: 40ms;
@@ -906,12 +990,12 @@ function refreshPlaylists() {
 }
 
 .song-artwork {
-  width: 56px;
-  height: 56px;
-  border-radius: 6px;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
   overflow: hidden;
   flex-shrink: 0;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
+  box-shadow: 0 4px 20px rgb(0 0 0 / 50%);
 }
 
 .song-artwork img {
@@ -923,33 +1007,40 @@ function refreshPlaylists() {
 .song-details {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
 }
 
 .song-title {
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 700;
+  font-size: 17px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
 }
 
 .song-artist {
-  font-size: 12px;
+  font-size: 14.5px;
   font-weight: 600;
-  opacity: 0.7;
+  opacity: 0.75;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
+  line-height: 1.3;
 }
 
 .song-album {
-  font-size: 11px;
+  font-size: 13px;
+  font-weight: 400;
   opacity: 0.5;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
+  line-height: 1.3;
 }
 
 /* ─── Search row ─── */
@@ -1062,21 +1153,29 @@ function refreshPlaylists() {
   flex: 1;
   overflow-y: auto;
   margin: 0 -20px;
-  padding: 0 20px;
+  padding: 4px 20px 8px;
   animation: modalEnter 0.4s var(--ease_appleSpring, cubic-bezier(0.25, 0.46, 0.45, 0.94)) both;
   animation-delay: 120ms;
   will-change: opacity, transform, filter;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  align-content: start;
+}
+
+.no-playlists {
+  grid-column: 1 / -1;
 }
 
 .playlist-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 7px 8px;
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.2s, transform 0.15s;
-  margin-bottom: 3px;
+  min-width: 0;
 }
 
 .playlist-item:hover {
@@ -1096,8 +1195,8 @@ function refreshPlaylists() {
 }
 
 .playlist-artwork {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border-radius: 4px;
   overflow: hidden;
   flex-shrink: 0;
@@ -1124,14 +1223,18 @@ function refreshPlaylists() {
 .playlist-info {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .playlist-name {
   font-weight: 500;
-  font-size: 12px;
+  font-size: 13px;
+  letter-spacing: 0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: block;
+  max-width: 100%;
 }
 
 /* ─── Checkbox ─── */
@@ -1157,11 +1260,12 @@ function refreshPlaylists() {
 
 .checkmark {
   display: block;
-  height: 19px;
-  width: 19px;
-  border: 2px solid rgb(255 255 255 / 30%);
+  height: 17px;
+  width: 17px;
+  border: 1.5px solid rgb(255 255 255 / 30%);
   border-radius: 4px;
   transition: all 0.2s;
+  flex-shrink: 0;
 }
 
 .checkbox-container:hover .checkmark {
@@ -1190,6 +1294,7 @@ function refreshPlaylists() {
   padding: 40px 20px;
   opacity: 0.5;
   font-size: 14px;
+  grid-column: 1 / -1;
 }
 
 /* ─── Footer ─── */
@@ -1244,15 +1349,23 @@ function refreshPlaylists() {
 }
 
 .c-btn.primary {
-  background: color-mix(in srgb, var(--modal-accent, var(--keyColor, #ff0033)) 65%, black 35%);
-  border-color: color-mix(in srgb, var(--modal-accent, var(--keyColor, #ff0033)) 80%, white 20%);
+  background: color-mix(in srgb, var(--nowPlaying-bgColor, var(--modal-accent, var(--keyColor, #ff0033))) 90%, white 10%);
+  border: 1px solid color-mix(in srgb, var(--nowPlaying-bgColor, var(--modal-accent, var(--keyColor, #ff0033))) 80%, white 20%);
   color: white;
+  font-weight: 600;
+}
+
+.c-btn.primary:disabled {
+  background: color-mix(in srgb, var(--nowPlaying-bgColor, var(--modal-accent, var(--keyColor, #ff0033))) 30%, transparent 70%);
+  border: 1px solid color-mix(in srgb, var(--nowPlaying-bgColor, var(--modal-accent, var(--keyColor, #ff0033))) 40%, transparent 60%);
+  box-shadow: none;
+  color: rgb(255 255 255 / 40%);
 }
 
 .c-btn.primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--modal-accent, var(--keyColor, #ff0033)) 80%, white 20%);
+  background: color-mix(in srgb, var(--nowPlaying-bgColor, var(--modal-accent, var(--keyColor, #ff0033))) 100%, white 0%);
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--modal-accent, var(--keyColor, #ff0033)) 50%, transparent);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--nowPlaying-bgColor, var(--modal-accent, var(--keyColor, #ff0033))) 75%, transparent);
 }
 
 .c-btn:disabled {

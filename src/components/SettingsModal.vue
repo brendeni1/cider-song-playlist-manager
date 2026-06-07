@@ -36,8 +36,12 @@ const customMinutes = ref(5);
 const showCustomInput = computed(() => selectedPreset.value === -1);
 const saveSuccess = ref(false);
 
-// Determine if we're in standalone modal mode
-const isStandalone = computed(() => props.standalone !== false && !!props.onClose);
+// Determine if we're in standalone modal mode.
+// Cider's embedded settings page passes no props at all, so both standalone
+// and onClose will be undefined — that should map to embedded (false).
+// Only treat as standalone when the caller explicitly passes standalone:true
+// AND provides an onClose handler.
+const isStandalone = computed(() => props.standalone === true && !!props.onClose);
 
 onMounted(() => {
   loadSettings();
@@ -237,7 +241,7 @@ function closeModal() {
             instead of reloading everything.
           </p>
           <p class="version-info">
-            Version 1.3.0 • Created by brenden.i1
+            Version 2.0.2 • Created by brenden.i1
           </p>
         </div>
       </div>

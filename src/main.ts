@@ -40,6 +40,13 @@ export const CustomElements = {
   }),
 };
 
+// ── Global init guard ────────────────────────────────────────────────────────
+// Prevents duplicate setup if Cider calls setup() more than once (e.g. on
+// hot-reload or plugin panel refresh). Without this, each call registers a new
+// context menu entry, creates new MutationObservers, and Cider counts each
+// as a separate running instance.
+const PLUGIN_INIT_GUARD = '__brendeni1_pm_initialized__';
+
 /**
  * Defining the plugin context
  */
@@ -47,17 +54,26 @@ const { plugin, customElementName } = definePluginContext({
   ...PluginConfig,
   CustomElements,
   setup() {
+    if ((window as any)[PLUGIN_INIT_GUARD]) {
+      console.warn('[PlaylistManager] Already initialized — skipping duplicate setup()');
+      return;
+    }
+    (window as any)[PLUGIN_INIT_GUARD] = true;
+
     /**
      * Registering the custom elements in the app
      */
     for (const [key, value] of Object.entries(CustomElements)) {
       const _key = key as keyof typeof CustomElements;
-      customElements.define(customElementName(_key), value);
+      // customElements.define throws if the name is already registered, so guard it
+      if (!customElements.get(customElementName(_key))) {
+        customElements.define(customElementName(_key), value);
+      }
     }
 
     /**
-     * Defining our custom settings element
-     * This tells Cider to use our settings component
+     * Defining our custom settings element — must be set before observers start
+     * so Cider picks it up when building the settings page.
      */
     this.SettingsElement = customElementName("settings-modal");
 
@@ -93,7 +109,7 @@ const { plugin, customElementName } = definePluginContext({
       // Convert songId to string immediately
       const songIdStr = String(songId);
       
-      console.log("Opening Playlist Manager with:", { songId: songIdStr, songTitle, songArtist });
+      console.log("[PlaylistManager] Opening modal:", songIdStr);
 
       if (!songIdStr || songIdStr === 'undefined' || songIdStr === 'null') {
         DialogAPI.createAlert("Invalid song ID provided.");
@@ -109,9 +125,6 @@ const { plugin, customElementName } = definePluginContext({
       const content = document.createElement(
         customElementName("playlist-manager-modal")
       ) as any;
-      
-      // Add a unique timestamp to force fresh data on each open
-      const timestamp = Date.now();
       
       // Set props on the custom element
       content._props = {
@@ -135,8 +148,6 @@ const { plugin, customElementName } = definePluginContext({
 
       // Open the dialog
       openDialog();
-      
-      console.log("Modal opened at timestamp:", timestamp);
     }
 
     /**
@@ -648,9 +659,7 @@ const { plugin, customElementName } = definePluginContext({
     (window as any).openPlaylistManager = openPlaylistManagerModal;
     (window as any).openPlaylistSettings = openSettingsModal;
     
-    console.log("Playlist Manager Plugin loaded successfully!");
-    console.log("Test with: window.openPlaylistManager('1440881859', 'More Than You Know', 'Axwell Λ Ingrosso', 'More Than You Know')");
-    console.log("Open settings with: window.openPlaylistSettings()");
+    console.log('[PlaylistManager] Loaded');
     
     // Try to add inline buttons to tracks (experimental)
     // This will attempt to inject a button next to the "..." menu on each track
@@ -897,7 +906,7 @@ const { plugin, customElementName } = definePluginContext({
               }
             }
             
-            console.log('Inline button clicked - extracted:', { songId, titleText, artistText, albumText, artworkUrl });
+            console.log('[PlaylistManager] Inline btn songId:', songId);
             
             if (songId) {
               openPlaylistManagerModal(
@@ -916,23 +925,32 @@ const { plugin, customElementName } = definePluginContext({
       });
     }
     
-    // Run on load and when DOM changes
+    // Run on load and when DOM changes.
+    // Debounced so that bursts of DOM mutations (e.g. Cider rendering a list)
+    // only trigger one scan instead of one per element added — this was the
+    // primary cause of the plugin appearing as 8 running instances.
+    let inlineButtonTimer: ReturnType<typeof setTimeout> | null = null;
     addInlineButtons();
-    
-    // Watch for new tracks being added to the DOM
     const observer = new MutationObserver(() => {
-      addInlineButtons();
+      if (inlineButtonTimer) clearTimeout(inlineButtonTimer);
+      inlineButtonTimer = setTimeout(addInlineButtons, 150);
     });
-    
     observer.observe(document.body, {
       childList: true,
       subtree: true,
     });
-    
-    /**
-     * Intercept the native "Add to Playlist" button in the now playing controls
-     * and replace it with our custom modal
-     */
+
+    // Watch for the now-playing Add-to-Playlist button to appear (debounced).
+    let interceptTimer: ReturnType<typeof setTimeout> | null = null;
+    setTimeout(interceptAddToPlaylistButton, 1000);
+    const btnObserver = new MutationObserver(() => {
+      if (interceptTimer) clearTimeout(interceptTimer);
+      interceptTimer = setTimeout(interceptAddToPlaylistButton, 250);
+    });
+    btnObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
     function interceptAddToPlaylistButton() {
       // Find the native Add to Playlist button using the selector you provided
       const addToPlaylistBtn = document.querySelector('#lcdplayer-controls-listen > div.item-actions.item-actions-glass > button:nth-child(3)') as HTMLElement;
@@ -951,143 +969,106 @@ const { plugin, customElementName } = definePluginContext({
         newBtn.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          
+
           console.log('Add to Playlist button clicked, getting current track...');
-          
-          // Get the currently playing track from the now playing div
-          const nowPlayingDiv = document.querySelector('.lcdplayer-info');
-          
-          if (!nowPlayingDiv) {
-            console.error('Could not find now playing div');
-            DialogAPI.createAlert('Unable to find currently playing track.');
-            return;
-          }
-          
-          // Extract song information — prefer musicKitStore, fall back to DOM
-          const mkStoreMeta = (window as any).CiderApp?.musicKitStore;
-          const nowPlayingMeta = mkStoreMeta?.nowPlayingItemMediaItem;
-          
-          const songNameEl = nowPlayingDiv.querySelector('.song-name');
-          // .release-info has two <span class="link"> children: album then artist
-          const releaseSpans = nowPlayingDiv.querySelectorAll('.release-info .link');
-          
-          let albumName = nowPlayingMeta?.attributes?.albumName ||
-                          (releaseSpans[0]?.textContent?.trim()) || '';
-          let artistName = nowPlayingMeta?.attributes?.artistName ||
-                           (releaseSpans[releaseSpans.length - 1]?.textContent?.trim()) || '';
-          
-          // Final fallback: parse raw text
-          if (!artistName) {
-            const releaseInfoText = nowPlayingDiv.querySelector('.release-info')?.textContent?.trim() || '';
-            if (releaseInfoText.includes(' - ')) {
-              const parts = releaseInfoText.split(' - ');
-              artistName = parts[parts.length - 1].trim();
-              albumName = albumName || parts.slice(0, -1).join(' - ').trim();
-            }
-          }
-          
-          const songTitle = songNameEl?.textContent?.trim() || 'Unknown Song';
-          const artist = artistName || 'Unknown Artist';
-          const album = albumName || '';
-          
-          // Get artwork URL - try multiple sources
+
+          // ── Primary: CiderApp.RPC.nowPlayingAttributes ──────────────────────
+          // Cider runs in MKLite-only mode — MusicKit.js is skipped entirely.
+          // The musicKitStore is a playlist/library-management store and has
+          // no now-playing data. The actual playback state is exposed through
+          // CiderApp.RPC.nowPlayingAttributes (confirmed from Socket.IO log).
+          const rpcAttrs = (window as any).CiderApp?.RPC?.nowPlayingAttributes;
+
+          let songId = '';
+          let songTitle = '';
+          let artist = '';
+          let album = '';
           let artworkUrl = '';
-          
-          // Try to get from picture source (higher quality)
-          const pictureSource = nowPlayingDiv.querySelector('.artwork picture source');
-          if (pictureSource) {
-            const srcset = (pictureSource as HTMLSourceElement).srcset;
-            if (srcset && !srcset.includes('data:image/svg')) {
-              // Extract the highest quality URL from srcset
-              const urls = srcset.split(',').map(s => s.trim().split(' ')[0]);
-              artworkUrl = urls[urls.length - 1] || urls[0];
-            }
-          }
-          
-          // Fallback to img tag
-          if (!artworkUrl) {
-            const artworkImg = nowPlayingDiv.querySelector('.artwork img');
-            if (artworkImg) {
-              const imgSrc = (artworkImg as HTMLImageElement).src || '';
-              if (!imgSrc.includes('data:image/svg')) {
-                artworkUrl = imgSrc;
-              }
-            }
-          }
-          
-          // Fallback: try artwork from musicKitStore
-          if (!artworkUrl) {
-            const mkStore = (window as any).CiderApp?.musicKitStore;
-            const artworkTemplate = mkStore?.nowPlayingItemMediaItem?.attributes?.artwork?.url ||
-                                    mkStore?.player?.nowPlayingItem?.attributes?.artwork?.url;
+
+          if (rpcAttrs) {
+            songId    = rpcAttrs.playParams?.id ||
+                        rpcAttrs.playParams?.catalogId ||
+                        rpcAttrs.id || '';
+            songTitle = rpcAttrs.name || '';
+            artist    = rpcAttrs.artistName || '';
+            album     = rpcAttrs.albumName  || '';
+            const artworkTemplate = rpcAttrs.artwork?.url;
             if (artworkTemplate) {
               artworkUrl = artworkTemplate
-                .replace('{w}', '300')
-                .replace('{h}', '300')
-                .replace('{f}', 'jpg')
-                .replace('.{f}', '.jpg');
+                .replace('{w}', '300').replace('{h}', '300')
+                .replace('{f}', 'jpg').replace('.{f}', '.jpg');
             }
           }
-          
-          // Get song ID from CiderApp.musicKitStore (MusicKit not available in plugin sandbox)
-          let songId = '';
-          const mkStore = (window as any).CiderApp?.musicKitStore;
-          
-          // nowPlayingItemMediaItem is the richest source
-          const nowPlayingMediaItem = mkStore?.nowPlayingItemMediaItem;
-          if (nowPlayingMediaItem) {
-            songId = nowPlayingMediaItem.id ||
-                    nowPlayingMediaItem.attributes?.playParams?.catalogId ||
-                    nowPlayingMediaItem.attributes?.playParams?.id ||
-                    '';
-          }
-          
-          // Fallback: player object in the store
+
+          // ── Fallback: other RPC / store paths ────────────────────────────────
           if (!songId) {
-            const player = mkStore?.player;
-            const item = player?.nowPlayingItem || player?.currentItem || player?._nowPlayingItem;
-            if (item) {
-              songId = item.id ||
-                      item.attributes?.playParams?.catalogId ||
-                      item.attributes?.playParams?.id ||
-                      '';
+            const rpc = (window as any).CiderApp?.RPC;
+            // Try other RPC properties that might hold the current item
+            const fallbackItem =
+              rpc?.nowPlayingItem ||
+              rpc?.currentTrack ||
+              rpc?.mediaItem;
+            if (fallbackItem) {
+              songId    = fallbackItem.id ||
+                          fallbackItem.attributes?.playParams?.id ||
+                          fallbackItem.attributes?.playParams?.catalogId || '';
+              songTitle = fallbackItem.attributes?.name || fallbackItem.name || '';
+              artist    = fallbackItem.attributes?.artistName || fallbackItem.artistName || '';
+              album     = fallbackItem.attributes?.albumName  || fallbackItem.albumName  || '';
+              const t = fallbackItem.attributes?.artwork?.url || fallbackItem.artwork?.url;
+              if (t) artworkUrl = t.replace('{w}','300').replace('{h}','300').replace('{f}','jpg').replace('.{f}','.jpg');
+              if (songId) console.log('[PlaylistManager] Got track from RPC fallback:', { songId, songTitle });
             }
           }
-          
-          console.log('Extracted current track:', { songId, songTitle, artist, album, artworkUrl });
-          
+
+          // ── Fallback: DOM scrape (AMPMetadataMojave layout) ────────────────
+          // Gets title/artist/album from the player UI when the store is empty.
+          // Span order in .release-info: span[0] = album, span[1] = artist.
+          // (Confirmed from "Ribs" log: Pure Heroine=album, Lorde=artist)
+          if (!songTitle) {
+            console.warn('[PlaylistManager] Store/Vue empty, falling back to DOM scrape');
+            const metadataEl =
+              document.querySelector('[sfc-name="AMPMetadataMojave"] .metadata-text') ||
+              document.querySelector('.c-metadata .metadata-text') ||
+              document.querySelector('.lcdplayer-info');
+
+            if (metadataEl) {
+              const songNameEl   = metadataEl.querySelector('.song-name');
+              const releaseSpans = metadataEl.querySelectorAll('.release-info .link');
+              songTitle = songNameEl?.textContent?.trim() || '';
+              // span[0] = album, span[1] = artist  (verified against live data)
+              album  = releaseSpans[0]?.textContent?.trim() || '';
+              artist = releaseSpans[releaseSpans.length - 1]?.textContent?.trim() || '';
+            }
+          }
+
+          // Artwork from the player img (blob URL Cider already has loaded)
+          if (!artworkUrl) {
+            const artworkImg = document.querySelector(
+              '[sfc-name="AMPLCDGlass"] .player-artwork img, .player-artwork img'
+            ) as HTMLImageElement | null;
+            if (artworkImg?.src && !artworkImg.src.includes('data:image/svg')) {
+              artworkUrl = artworkImg.src;
+            }
+          }
+
+          console.log('[PlaylistManager] Final track data:', { songId, songTitle, artist, album, artworkUrl });
+
           if (!songId) {
-            console.error('Could not extract song ID from now playing');
-            DialogAPI.createAlert('Unable to identify the currently playing song. Please try using the context menu on the song instead.');
+            console.error('[PlaylistManager] Could not extract song ID');
+            DialogAPI.createAlert(
+              'Unable to identify the currently playing song. ' +
+              'Please try the context menu on the track row instead.'
+            );
             return;
           }
-          
-          // Open the playlist manager modal
-          openPlaylistManagerModal(
-            songId,
-            songTitle,
-            artist,
-            album,
-            artworkUrl
-          );
+
+          openPlaylistManagerModal(songId, songTitle, artist, album, artworkUrl);
         });
         
         console.log('Successfully intercepted Add to Playlist button');
       }
     }
-    
-    // Run on load
-    setTimeout(interceptAddToPlaylistButton, 1000);
-    
-    // Watch for button to appear (in case it loads late)
-    const btnObserver = new MutationObserver(() => {
-      interceptAddToPlaylistButton();
-    });
-    
-    btnObserver.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
     
     // Add CSS for inline buttons
     const style = document.createElement('style');
